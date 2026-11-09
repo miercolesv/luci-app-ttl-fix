@@ -20,6 +20,8 @@ mkdir -p "$STAGE/www" "$STAGE/lib/apk/packages" "$SCR"
 
 cp -a "$SRC/root/." "$STAGE/"
 cp -a "$SRC/htdocs/." "$STAGE/www/"
+# packaged files must be owned by root (a CI checkout belongs to another uid)
+[ "$(id -u)" = 0 ] && chown -R 0:0 "$STAGE"
 
 # OpenWrt package metadata files
 echo /etc/config/ttlfix > "$STAGE/lib/apk/packages/$PKG.conffiles"

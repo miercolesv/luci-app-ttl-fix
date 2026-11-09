@@ -32,3 +32,5 @@ git tag v1.0.0-r1 && git push origin v1.0.0-r1
 ```
 
 GitHub Actions builds both packages, adds `install-ttlfix.sh` and `SHA256SUMS`, and publishes the release. The workflow fails if the tag doesn't match the Makefile version.
+
+Alternatively run the workflow from the Actions tab with **release** ticked; it creates the tag itself from the Makefile version.

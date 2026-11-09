@@ -1,11 +1,17 @@
 name: Build and release
 
 # Push a tag like v1.0.0-r1 to build both packages and publish a release.
-# Run it manually (Actions tab -> Run workflow) to build without releasing.
+# Or run it manually (Actions tab -> Run workflow): it builds, and with
+# "release" ticked it also creates the v<version> tag and release from the Makefile version.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release for the Makefile version"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -57,10 +63,11 @@ jobs:
           path: dist/*
 
       - name: Publish release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          TAG="v$VER"
           cat > notes.md <<EOF
           **OpenWrt 25.12+ (apk):**
           \`\`\`
@@ -76,5 +83,5 @@ jobs:
 
           The page is under **Network → TTL fix** in LuCI.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" \
+            --title "$TAG" --notes-file notes.md
