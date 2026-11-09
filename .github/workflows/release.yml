@@ -1,0 +1,80 @@
+name: Build and release
+
+# Push a tag like v1.0.0-r1 to build both packages and publish a release.
+# Run it manually (Actions tab -> Run workflow) to build without releasing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version
+        run: |
+          MK_VER="$(sed -n 's/^PKG_VERSION:=//p' Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' Makefile)"
+          echo "Makefile version: $MK_VER"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+            if [ "$VER" != "$MK_VER" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Makefile version $MK_VER"
+              exit 1
+            fi
+          else
+            VER="$MK_VER"
+          fi
+          echo "Building version: $VER"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          mkdir -p dist
+
+      - name: Build .ipk (opkg, OpenWrt 24.10 and older)
+        run: python3 build-ipk.py "$VER" dist
+
+      - name: Build .apk (apk v3, OpenWrt 25.12+)
+        run: |
+          # Alpine 3.23 ships apk-tools 3.x, the same package format OpenWrt uses.
+          docker run --rm -v "$PWD:/w" -w /w -e SOURCE_DATE_EPOCH alpine:3.23 \
+            sh -c 'apk --version && sh build-apk.sh /sbin/apk "$0" dist' "$VER"
+
+      - name: Add installer script and checksums
+        run: |
+          cp install-ttlfix.sh dist/
+          cd dist
+          sha256sum *.ipk *.apk install-ttlfix.sh > SHA256SUMS
+          ls -l
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-ttlfix-${{ env.VER }}
+          path: dist/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          **OpenWrt 25.12+ (apk):**
+          \`\`\`
+          apk add --allow-untrusted /tmp/luci-app-ttlfix-$VER.apk
+          \`\`\`
+
+          **OpenWrt 24.10 and older (opkg):**
+          \`\`\`
+          opkg install /tmp/luci-app-ttlfix_${VER}_all.ipk
+          \`\`\`
+
+          Or copy \`install-ttlfix.sh\` to the router and run \`sh install-ttlfix.sh\`.
+
+          The page is under **Network → TTL fix** in LuCI.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md

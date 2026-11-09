@@ -1,0 +1,18 @@
+#!/bin/sh
+# Re-apply when one of the selected interfaces comes up
+# (its device name can change, e.g. after joining a new hotel network).
+
+[ "$ACTION" = "ifup" ] || exit 0
+/etc/init.d/ttlfix enabled || exit 0
+
+. /lib/functions.sh
+config_load ttlfix
+config_get_bool enabled main enabled 0
+[ "$enabled" = "1" ] || exit 0
+
+match=0
+check_iface() { [ "$1" = "$INTERFACE" ] && match=1; }
+config_list_foreach main interface check_iface
+[ "$match" = "1" ] || exit 0
+
+/usr/sbin/ttlfix apply

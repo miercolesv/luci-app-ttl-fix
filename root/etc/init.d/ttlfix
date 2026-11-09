@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+USE_PROCD=1
+
+start_service() {
+	/usr/sbin/ttlfix apply
+}
+
+stop_service() {
+	/usr/sbin/ttlfix remove
+}
+
+reload_service() {
+	/usr/sbin/ttlfix apply
+}
+
+service_triggers() {
+	procd_add_reload_trigger "ttlfix"
+}

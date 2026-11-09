@@ -1,0 +1,14 @@
+{
+	"admin/network/ttlfix": {
+		"title": "TTL fix",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "ttlfix"
+		},
+		"depends": {
+			"acl": [ "luci-app-ttlfix" ],
+			"uci": { "ttlfix": true }
+		}
+	}
+}

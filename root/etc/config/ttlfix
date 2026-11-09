@@ -1,0 +1,6 @@
+
+config ttlfix 'main'
+	option enabled '0'
+	option ttl '64'
+	option ipv6 '1'
+	list interface 'wwan'
