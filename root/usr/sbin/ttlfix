@@ -1,0 +1,106 @@
+#!/bin/sh
+# ttlfix: rewrite TTL / hop limit on outgoing packets of selected interfaces.
+# Uses its own nftables table (inet ttlfix), so it never touches fw4 and
+# never needs a firewall restart.
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+TABLE="ttlfix"
+RULEFILE="/var/run/ttlfix.nft"
+
+log() { logger -t ttlfix "$*"; }
+
+resolve_dev() {
+	# logical interface (e.g. wwan) -> L3 device (e.g. phy0-sta0)
+	local dev
+	dev="$(ifstatus "$1" 2>/dev/null | jsonfilter -q -e '@.l3_device')"
+	[ -n "$dev" ] || dev="$(ifstatus "$1" 2>/dev/null | jsonfilter -q -e '@.device')"
+	echo "$dev"
+}
+
+DEVS=""
+add_dev() {
+	local dev
+	dev="$(resolve_dev "$1")"
+	if [ -n "$dev" ]; then
+		DEVS="${DEVS:+$DEVS, }\"$dev\""
+	else
+		log "interface '$1' is not up yet, skipped (will be applied when it comes up)"
+	fi
+}
+
+remove_rules() {
+	nft delete table inet "$TABLE" 2>/dev/null
+	rm -f "$RULEFILE"
+}
+
+apply_rules() {
+	local enabled ttl ipv6
+
+	config_load ttlfix
+	config_get_bool enabled main enabled 0
+	config_get ttl main ttl 64
+	config_get_bool ipv6 main ipv6 1
+
+	if [ "$enabled" != "1" ]; then
+		remove_rules
+		log "disabled"
+		return 0
+	fi
+
+	case "$ttl" in
+		''|*[!0-9]*) log "invalid ttl '$ttl'"; return 1 ;;
+	esac
+	if [ "$ttl" -lt 1 ] || [ "$ttl" -gt 255 ]; then
+		log "ttl '$ttl' out of range 1-255"
+		return 1
+	fi
+
+	DEVS=""
+	config_list_foreach main interface add_dev
+
+	if [ -z "$DEVS" ]; then
+		remove_rules
+		log "no active interfaces, nothing applied"
+		return 0
+	fi
+
+	mkdir -p "${RULEFILE%/*}"
+	{
+		echo "table inet $TABLE {"
+		echo "	chain postrouting {"
+		echo "		type filter hook postrouting priority 300; policy accept;"
+		echo "		oifname { $DEVS } ip ttl set $ttl"
+		[ "$ipv6" = "1" ] && echo "		oifname { $DEVS } ip6 hoplimit set $ttl"
+		echo "	}"
+		echo "}"
+	} > "$RULEFILE.tmp"
+
+	# validate first, then swap atomically
+	if ! nft -c -f "$RULEFILE.tmp" 2>/dev/null; then
+		log "generated rules failed validation, nothing changed"
+		rm -f "$RULEFILE.tmp"
+		return 1
+	fi
+
+	{ echo "table inet $TABLE"; echo "delete table inet $TABLE"; cat "$RULEFILE.tmp"; } | nft -f - \
+		&& mv "$RULEFILE.tmp" "$RULEFILE" \
+		&& log "applied: ttl $ttl on $DEVS"
+}
+
+status() {
+	if nft list table inet "$TABLE" >/dev/null 2>&1; then
+		echo "active"
+		nft list table inet "$TABLE" | grep -E 'oifname'
+	else
+		echo "inactive"
+	fi
+}
+
+case "$1" in
+	apply|start|reload) apply_rules ;;
+	stop|remove) remove_rules ;;
+	status) status ;;
+	*) echo "usage: $0 apply|remove|status"; exit 1 ;;
+esac

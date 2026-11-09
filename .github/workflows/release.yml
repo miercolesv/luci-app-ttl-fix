@@ -1,0 +1,136 @@
+name: Build and release
+
+# Push a tag like v1.0.0-r1 to build, test and release.
+# Or run it manually (Actions tab -> Run workflow): it builds and tests, and with
+# "release" ticked it also creates the v<version> tag/release from the Makefile version.
+# Routers install the latest release with install.sh.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release for the Makefile version"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  ALPINE: alpine:3.23                     # ships apk-tools 3.x, same format as OpenWrt
+  OPENWRT_OPKG: openwrt/rootfs:x86-64-24.10.8
+  OPENWRT_APK: openwrt/rootfs:x86-64-25.12.6
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out version
+        run: |
+          MK_VER="$(sed -n 's/^PKG_VERSION:=//p' Makefile)-r$(sed -n 's/^PKG_RELEASE:=//p' Makefile)"
+          echo "Makefile version: $MK_VER"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+            if [ "$VER" != "$MK_VER" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Makefile version $MK_VER"
+              exit 1
+            fi
+          else
+            VER="$MK_VER"
+          fi
+          echo "Building version: $VER"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] || [ "${{ inputs.release }}" = "true" ]; then
+            echo "RELEASE=1" >> "$GITHUB_ENV"
+          fi
+          mkdir -p dist
+
+      - name: Build .ipk (opkg, OpenWrt 24.10 and older)
+        run: python3 build-ipk.py "$VER" dist
+
+      - name: Build .apk (apk v3, OpenWrt 25.12+)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e SOURCE_DATE_EPOCH "$ALPINE" \
+            sh -c 'apk --version && sh build-apk.sh /sbin/apk "$0" dist' "$VER"
+
+      - name: Build an older dummy version (to test upgrades)
+        run: |
+          python3 build-ipk.py 0.0.0-r0 old
+          docker run --rm -v "$PWD:/w" -w /w "$ALPINE" sh build-apk.sh /sbin/apk 0.0.0-r0 old
+
+      - name: Test install.sh upgrade on OpenWrt 24.10 (opkg)
+        run: |
+          docker run --rm -e VER -v "$PWD:/w:ro" "$OPENWRT_OPKG" sh -c '
+            set -e; mkdir -p /var/lock /tmp/lock
+            opkg update >/dev/null
+            opkg install /w/old/*.ipk
+            echo "before: $(opkg list-installed luci-app-ttlfix)"
+            sh /w/install.sh /w/dist/luci-app-ttlfix_${VER}_all.ipk
+            echo "after:  $(opkg list-installed luci-app-ttlfix)"
+            opkg list-installed luci-app-ttlfix | grep -q " - $VER\$"
+            ls -l /usr/sbin/ttlfix /etc/config/ttlfix /www/luci-static/resources/view/ttlfix.js'
+
+      - name: Test install.sh upgrade on OpenWrt 25.12 (apk)
+        run: |
+          docker run --rm -e VER -v "$PWD:/w:ro" "$OPENWRT_APK" sh -c '
+            set -e; mkdir -p /var/lock /tmp/lock
+            apk update >/dev/null
+            apk add --allow-untrusted /w/old/*.apk
+            echo "before: $(apk list --installed luci-app-ttlfix)"
+            sh /w/install.sh /w/dist/luci-app-ttlfix-$VER.apk
+            echo "after:  $(apk list --installed luci-app-ttlfix)"
+            apk list --installed luci-app-ttlfix | grep -q "luci-app-ttlfix-$VER "
+            ls -l /usr/sbin/ttlfix /etc/config/ttlfix /www/luci-static/resources/view/ttlfix.js'
+
+      - name: Add installer script and checksums
+        run: |
+          cp install-ttlfix.sh dist/
+          cd dist
+          sha256sum *.ipk *.apk install-ttlfix.sh > SHA256SUMS
+          ls -l
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-ttlfix-${{ env.VER }}
+          path: dist/*
+
+      - name: Publish release
+        if: env.RELEASE == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$VER"
+          cat > notes.md <<EOF
+          Install or update on the router (picks apk or opkg automatically):
+          \`\`\`
+          wget -qO- https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/install.sh | sh
+          \`\`\`
+
+          Or download a package below:
+
+          **OpenWrt 25.12+ (apk):**
+          \`\`\`
+          apk add --allow-untrusted /tmp/luci-app-ttlfix-$VER.apk
+          \`\`\`
+
+          **OpenWrt 24.10 and older (opkg):**
+          \`\`\`
+          opkg install /tmp/luci-app-ttlfix_${VER}_all.ipk
+          \`\`\`
+
+          Or copy \`install-ttlfix.sh\` to the router and run \`sh install-ttlfix.sh\`.
+
+          The page is under **Network → TTL fix** in LuCI.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists: replacing its files with this build"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" \
+              --title "$TAG" --notes-file notes.md
+          fi

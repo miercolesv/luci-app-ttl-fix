@@ -1,0 +1,17 @@
+{
+	"luci-app-ttlfix": {
+		"description": "Grant access to TTL fix configuration",
+		"read": {
+			"file": {
+				"/usr/sbin/ttlfix status": [ "exec" ]
+			},
+			"uci": [ "ttlfix" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/ttlfix": [ "exec" ]
+			},
+			"uci": [ "ttlfix" ]
+		}
+	}
+}
